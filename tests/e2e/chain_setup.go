@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"io"
 	"math/rand"
 	"os"
@@ -48,7 +49,7 @@ type KeyringOverride struct {
 
 // ChainBuilderFromChainSpec creates an interchaintest chain builder factory given a ChainSpec
 // and returns the associated chain
-func ChainBuilderFromChainSpec(t *testing.T, spec *interchaintest.ChainSpec) ibc.Chain {
+func ChainBuilderFromChainSpec(t *testing.T, spec *interchaintest.ChainSpec) *cosmos.CosmosChain {
 	// require that NumFullNodes == NumValidators == 4
 	require.Equal(t, *spec.NumValidators, 4)
 
@@ -60,10 +61,10 @@ func ChainBuilderFromChainSpec(t *testing.T, spec *interchaintest.ChainSpec) ibc
 	require.Len(t, chains, 1)
 	chain := chains[0]
 
-	_, ok := chain.(*cosmos.CosmosChain)
+	cosmosChain, ok := chain.(*cosmos.CosmosChain)
 	require.True(t, ok)
 
-	return chain
+	return cosmosChain
 }
 
 // BuildInterchain creates a new Interchain testing env with the configured Block SDK CosmosChain
@@ -132,11 +133,11 @@ func (s *E2ETestSuite) CreateDummyAuctionBidTx(
 	searcher ibc.Wallet,
 	bid sdk.Coin,
 ) Tx {
-	msgAuctionBid := auctiontypes.NewMsgAuctionBid(
-		searcher.Address(),
-		bid,
-		nil,
-	)
+	msgAuctionBid := &auctiontypes.MsgAuctionBid{
+		Bidder:       searcher.FormattedAddress(),
+		Bid:          bid,
+		Transactions: nil,
+	}
 
 	return Tx{
 		User:               searcher,
@@ -154,11 +155,11 @@ func (s *E2ETestSuite) CreateDummyNormalTx(
 	sequenceOffset int64,
 	gasPrice int64,
 ) Tx {
-	msgSend := banktypes.NewMsgSend(
-		sdk.AccAddress(from.Address()),
-		sdk.AccAddress(to.Address()),
-		coins,
-	)
+	msgSend := &banktypes.MsgSend{
+		FromAddress: from.FormattedAddress(),
+		ToAddress:   to.FormattedAddress(),
+		Amount:      coins,
+	}
 
 	return Tx{
 		User:               from,
@@ -176,11 +177,11 @@ func (s *E2ETestSuite) CreateDummyFreeTx(
 	delegation sdk.Coin,
 	sequenceOffset int64,
 ) Tx {
-	delegateMsg := stakingtypes.NewMsgDelegate(
-		sdk.AccAddress(user.Address()),
-		sdk.ValAddress(validator),
-		delegation,
-	)
+	delegateMsg := &stakingtypes.MsgDelegate{
+		DelegatorAddress: user.FormattedAddress(),
+		ValidatorAddress: MustValAddressToBech32(s.chain, validator),
+		Amount:           delegation,
+	}
 
 	return Tx{
 		User:               user,
@@ -233,16 +234,12 @@ func (s *E2ETestSuite) CreateAuctionBidMsg(ctx context.Context, searcher cosmos.
 		txs[i] = s.CreateTx(ctx, chain, tx.User, tx.SequenceIncrement, tx.Height, tx.GasPrice, tx.Msgs...)
 	}
 
-	bech32SearcherAddress := searcher.FormattedAddress()
-	accAddr, err := sdk.AccAddressFromBech32(bech32SearcherAddress)
-	s.Require().NoError(err)
-
 	// create a message auction bid
-	return auctiontypes.NewMsgAuctionBid(
-		accAddr,
-		bid,
-		txs,
-	), txs
+	return &auctiontypes.MsgAuctionBid{
+		Bidder:       searcher.FormattedAddress(),
+		Bid:          bid,
+		Transactions: txs,
+	}, txs
 }
 
 // BroadcastTxs broadcasts the given messages for each user. This function returns the broadcasted txs. If a message
@@ -283,7 +280,7 @@ func (s *E2ETestSuite) BroadcastTxsWithCallback(
 
 		// check execution was successful
 		if !txs[i].ExpectFail {
-			s.Require().Equal(resp.Code, uint32(0))
+			s.Require().Equal(resp.Code, uint32(0), resp.Log)
 		} else {
 			if resp != nil {
 				s.Require().NotEqual(resp.Code, uint32(0))
@@ -381,12 +378,10 @@ func QueryMempool(t *testing.T, chain ibc.Chain) (*servicetypes.GetTxDistributio
 }
 
 // QueryAccountBalance queries a given account's balance on the chain
-func QueryAccountBalance(t *testing.T, chain ibc.Chain, address, denom string) int64 {
-	// cast the chain to a cosmos-chain
-	cosmosChain, ok := chain.(*cosmos.CosmosChain)
-	require.True(t, ok)
+func QueryAccountBalance(t *testing.T, chain *cosmos.CosmosChain, address sdk.AccAddress, denom string) int64 {
+	addressString := MustAccAddressToBech32(chain, address)
 	// get nodes
-	balance, err := cosmosChain.GetBalance(context.Background(), address, denom)
+	balance, err := chain.GetBalance(context.Background(), addressString, denom)
 	require.NoError(t, err)
 	return balance.Int64()
 }
@@ -456,7 +451,7 @@ func TxHash(tx []byte) string {
 }
 
 func (s *E2ETestSuite) setupBroadcaster() {
-	bc := cosmos.NewBroadcaster(s.T(), s.chain.(*cosmos.CosmosChain))
+	bc := cosmos.NewBroadcaster(s.T(), s.chain)
 
 	if s.broadcasterOverrides == nil {
 		s.bc = bc
@@ -488,7 +483,7 @@ func (s *E2ETestSuite) setupBroadcaster() {
 
 // sniped from here: https://github.com/strangelove-ventures/interchaintest ref: 9341b001214d26be420f1ca1ab0f15bad17faee6
 func (s *E2ETestSuite) keyringDirFromNode() string {
-	node := s.chain.(*cosmos.CosmosChain).Nodes()[0]
+	node := s.chain.Nodes()[0]
 
 	// create a temp-dir
 	localDir := s.T().TempDir()
@@ -527,4 +522,20 @@ func (s *E2ETestSuite) keyringDirFromNode() string {
 
 func escrowAddressIncrement(bid math.Int, proposerFee math.LegacyDec) int64 {
 	return int64(bid.Sub(math.Int(math.LegacyNewDecFromInt(bid).Mul(proposerFee).RoundInt())).Int64())
+}
+
+func MustValAddressToBech32(c *cosmos.CosmosChain, addr sdk.ValAddress) string {
+	a, err := bech32.ConvertAndEncode(c.Config().Bech32Prefix+sdk.PrefixValidator+sdk.PrefixOperator, addr)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+func MustAccAddressToBech32(c *cosmos.CosmosChain, addr sdk.AccAddress) string {
+	a, err := c.AccAddressToBech32(addr)
+	if err != nil {
+		panic(err)
+	}
+	return a
 }

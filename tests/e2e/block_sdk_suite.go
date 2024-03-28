@@ -37,7 +37,7 @@ type E2ETestSuite struct {
 	// spec
 	spec *interchaintest.ChainSpec
 	// chain
-	chain ibc.Chain
+	chain *cosmos.CosmosChain
 	// interchain
 	ic *interchaintest.Interchain
 	// users
@@ -63,11 +63,6 @@ func NewE2ETestSuiteFromSpec(spec *interchaintest.ChainSpec) *E2ETestSuite {
 
 func (s *E2ETestSuite) WithDenom(denom string) *E2ETestSuite {
 	s.denom = denom
-
-	// update the bech32 prefixes
-	sdk.GetConfig().SetBech32PrefixForAccount(s.denom, s.denom+sdk.PrefixPublic)
-	sdk.GetConfig().SetBech32PrefixForValidator(s.denom+sdk.PrefixValidator, s.denom+sdk.PrefixValidator+sdk.PrefixPublic)
-	sdk.GetConfig().Seal()
 	return s
 }
 
@@ -110,9 +105,9 @@ func (s *E2ETestSuite) TearDownSuite() {
 func (s *E2ETestSuite) SetupSubTest() {
 	// wait for 1 block height
 	// query height
-	height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+	height, err := s.chain.Height(context.Background())
 	require.NoError(s.T(), err)
-	WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+3)
+	WaitForHeight(s.T(), s.chain, height+3)
 	s.T().Logf("reached height %d", height+2)
 }
 
@@ -139,7 +134,7 @@ func (s *E2ETestSuite) TestMempoolService() {
 //  4. Top of block bids will be included in block proposals before other transactions
 func (s *E2ETestSuite) TestValidBids() {
 	params := QueryAuctionParams(s.T(), s.chain)
-	escrowAddr := sdk.AccAddress(params.EscrowAccountAddress).String()
+	escrowAddr := params.EscrowAccountAddress
 
 	s.Run("Valid Auction Bid", func() {
 		// get escrow account balance before bid
@@ -147,15 +142,19 @@ func (s *E2ETestSuite) TestValidBids() {
 
 		// create bundle w/ a single tx
 		// create message send tx
-		tx := banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))
+		tx := &banktypes.MsgSend{
+			FromAddress: s.user1.FormattedAddress(),
+			ToAddress:   s.user2.FormattedAddress(),
+			Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+		}
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 1
 
 		// create the MsgAuctioBid
 		bidAmt := params.ReserveFee
-		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{
+		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{
 			{
 				User: s.user1,
 				Msgs: []sdk.Msg{
@@ -167,21 +166,21 @@ func (s *E2ETestSuite) TestValidBids() {
 		})
 
 		// broadcast + wait for the tx to be included in a block
-		res := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		res := s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:   s.user1,
 				Msgs:   []sdk.Msg{bid},
 				Height: nextBlockHeight,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
 		expectedBlock := [][]byte{
 			res[0],
 			bundledTxs[0],
 		}
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, expectedBlock)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, expectedBlock)
 
 		// ensure that the escrow account has the correct balance
 		escrowAcctBalanceAfterBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -196,16 +195,24 @@ func (s *E2ETestSuite) TestValidBids() {
 		// create the bundle w/ a single tx
 		// bank-send msg
 		msgs := make([]sdk.Msg, 2)
-		msgs[0] = banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))
-		msgs[1] = banktypes.NewMsgSend(s.user2.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))
+		msgs[0] = &banktypes.MsgSend{
+			FromAddress: s.user1.FormattedAddress(),
+			ToAddress:   s.user2.FormattedAddress(),
+			Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+		}
+		msgs[1] = &banktypes.MsgSend{
+			FromAddress: s.user2.FormattedAddress(),
+			ToAddress:   s.user3.FormattedAddress(),
+			Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+		}
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 1
 
 		// create the MsgAuctionBid
 		bidAmt := params.ReserveFee
-		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{
+		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{
 			{
 				User:              s.user1,
 				Msgs:              msgs[0:1],
@@ -228,8 +235,8 @@ func (s *E2ETestSuite) TestValidBids() {
 		})
 
 		// broadcast + wait for the tx to be included in a block
-		res := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), txs)
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		res := s.BroadcastTxs(context.Background(), s.chain, txs)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
 		expectedBlock := [][]byte{
@@ -237,7 +244,7 @@ func (s *E2ETestSuite) TestValidBids() {
 			bundledTxs[0],
 			res[1],
 		}
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, expectedBlock)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, expectedBlock)
 
 		// ensure that escrow account has the correct balance
 		escrowAcctBalanceAfterBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -249,36 +256,48 @@ func (s *E2ETestSuite) TestValidBids() {
 		// get escrow account balance before bid
 		escrowAcctBalanceBeforeBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// create multi-tx valid bundle
 		// bank-send msg
 		txs := make([]Tx, 2)
 		txs[0] = Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            nextBlockHeight,
 		}
 		txs[1] = Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user3.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 2,
 			Height:            nextBlockHeight,
 		}
 		// create bundle
 		bidAmt := params.ReserveFee
-		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, txs)
+		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, txs)
 		// create 2 more bundle w same txs from same user
-		bid2, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt.Add(params.MinBidIncrement), txs)
-		bid3, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt.Add(params.MinBidIncrement).Add(params.MinBidIncrement), txs)
+		bid2, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt.Add(params.MinBidIncrement), txs)
+		bid3, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt.Add(params.MinBidIncrement).Add(params.MinBidIncrement), txs)
 
 		// broadcast all bids
-		broadcastedTxs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		broadcastedTxs := s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:               s.user1,
 				Msgs:               []sdk.Msg{bid},
@@ -297,7 +316,7 @@ func (s *E2ETestSuite) TestValidBids() {
 				Height: nextBlockHeight,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
 		expectedBlock := [][]byte{
@@ -305,7 +324,7 @@ func (s *E2ETestSuite) TestValidBids() {
 			bundledTxs[0],
 			bundledTxs[1],
 		}
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, expectedBlock)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, expectedBlock)
 
 		//  check escrow account balance
 		escrowAcctBalanceAfterBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -315,7 +334,7 @@ func (s *E2ETestSuite) TestValidBids() {
 
 	s.Run("bid with a bundle with transactions that are already in the mempool", func() {
 		// reset
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
@@ -323,24 +342,36 @@ func (s *E2ETestSuite) TestValidBids() {
 		escrowAcctBalanceBeforeBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
 
 		// wait for the next height
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// create valid bundle
 		// bank-send msg
 		txs := make([]Tx, 2)
 		txs[0] = Tx{
 			User: s.user1,
-			Msgs: []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 		}
 		txs[1] = Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user3.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 		}
 
 		// create bundle
 		bidAmt := params.ReserveFee
-		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user2, s.chain.(*cosmos.CosmosChain), bidAmt, txs)
+		bid, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user2, s.chain, bidAmt, txs)
 
 		txsToBroadcast := []Tx{
 			{
@@ -350,13 +381,19 @@ func (s *E2ETestSuite) TestValidBids() {
 			},
 			{
 				User: s.user3,
-				Msgs: []sdk.Msg{banktypes.NewMsgSend(s.user3.Address(), s.user1.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))},
+				Msgs: []sdk.Msg{
+					&banktypes.MsgSend{
+						FromAddress: s.user3.FormattedAddress(),
+						ToAddress:   s.user1.FormattedAddress(),
+						Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+					},
+				},
 			},
 		}
 
 		// broadcast txs in the bundle to network + bundle + extra
-		broadcastedTxs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), append(txsToBroadcast, txs...))
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		broadcastedTxs := s.BroadcastTxs(context.Background(), s.chain, append(txsToBroadcast, txs...))
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// Verify the block
 		expectedBlock := [][]byte{
@@ -365,7 +402,7 @@ func (s *E2ETestSuite) TestValidBids() {
 			bundledTxs[1],
 			broadcastedTxs[1],
 		}
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, expectedBlock)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, expectedBlock)
 
 		// check escrow account balance
 		escrowAcctBalanceAfterBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -386,15 +423,15 @@ func (s *E2ETestSuite) TestValidBids() {
 //     the bids should be executed respecting the highest bids until the timeout is reached.
 func (s *E2ETestSuite) TestMultipleBids() {
 	params := QueryAuctionParams(s.T(), s.chain)
-	escrowAddr := sdk.AccAddress(params.EscrowAccountAddress).String()
+	escrowAddr := params.EscrowAccountAddress
 
 	s.Run("Multiple bid transactions with second bid being smaller than min bid increment", func() {
 		// get chain height
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// escrow account balance
 		escrowAcctBalanceBeforeBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -403,22 +440,34 @@ func (s *E2ETestSuite) TestMultipleBids() {
 		// bank-send msg
 		bidAmt := params.ReserveFee
 		bundleTx1 := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            nextBlockHeight,
 		}
 		// create bid1
-		bid1, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{bundleTx1})
+		bid1, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{bundleTx1})
 
 		// create bid 2
 		bundleTx2 := Tx{
-			User:              s.user2,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user2.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user2,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user2.FormattedAddress(),
+					ToAddress:   s.user3.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            nextBlockHeight,
 		}
-		bid2, _ := s.CreateAuctionBidMsg(context.Background(), s.user2, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{bundleTx2})
+		bid2, _ := s.CreateAuctionBidMsg(context.Background(), s.user2, s.chain, bidAmt, []Tx{bundleTx2})
 
 		txs := []Tx{
 			{
@@ -435,15 +484,15 @@ func (s *E2ETestSuite) TestMultipleBids() {
 		}
 
 		// broadcast both bids (wait for the first to be committed)
-		resp := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), txs)
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		resp := s.BroadcastTxs(context.Background(), s.chain, txs)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
 		expectedBlock := [][]byte{
 			resp[0],
 			bundledTxs[0],
 		}
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, expectedBlock)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, expectedBlock)
 
 		// check escrow balance
 		escrowAcctBalanceAfterBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -453,11 +502,11 @@ func (s *E2ETestSuite) TestMultipleBids() {
 
 	s.Run("Multiple transactions from diff. account with increasing bids and first bid should fail in later block", func() {
 		// get chain height
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// escrow account balance
 		escrowAcctBalanceBeforeBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -466,19 +515,31 @@ func (s *E2ETestSuite) TestMultipleBids() {
 		bidAmt := params.ReserveFee
 		bundleTx1 := Tx{
 			User: s.user3,
-			Msgs: []sdk.Msg{banktypes.NewMsgSend(s.user3.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user3.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 		}
-		bid1, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{bundleTx1})
+		bid1, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{bundleTx1})
 
 		// create bid2 w/ higher bid than bid1
 		bidAmt = params.ReserveFee.Add(params.MinBidIncrement)
 		bundleTx2 := Tx{
-			User:              s.user2,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user2.Address(), s.user1.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))},
+			User: s.user2,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user2.FormattedAddress(),
+					ToAddress:   s.user1.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			Height:            nextBlockHeight,
 			SequenceIncrement: 1,
 		}
-		bid2, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user2, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{bundleTx2})
+		bid2, bundledTxs := s.CreateAuctionBidMsg(context.Background(), s.user2, s.chain, bidAmt, []Tx{bundleTx2})
 
 		txs := []Tx{
 			{
@@ -495,19 +556,19 @@ func (s *E2ETestSuite) TestMultipleBids() {
 		}
 
 		// broadcast both bids (wait for the second to be committed)
-		resp := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), txs)
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		resp := s.BroadcastTxs(context.Background(), s.chain, txs)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
 		expectedBlock := [][]byte{
 			resp[1],
 			bundledTxs[0],
 		}
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, expectedBlock)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, expectedBlock)
 
 		// Wait for next block and ensure other bid did not get included
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight+1)
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight+1, nil)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight+1)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight+1, nil)
 
 		// check escrow balance
 		escrowAcctBalanceAfterBid := QueryAccountBalance(s.T(), s.chain, escrowAddr, params.ReserveFee.Denom)
@@ -520,21 +581,27 @@ func (s *E2ETestSuite) TestInvalidBids() {
 	params := QueryAuctionParams(s.T(), s.chain)
 
 	s.Run("searcher is attempting to submit a bundle that includes another bid tx", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 2,
 			Height:            height + 1,
 		}
 		bidAmt := params.ReserveFee
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// wrap bidTx in another tx
-		wrappedBid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{
+		wrappedBid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{
 			{
 				User:              s.user1,
 				Msgs:              []sdk.Msg{bid},
@@ -544,7 +611,7 @@ func (s *E2ETestSuite) TestInvalidBids() {
 		})
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{wrappedBid},
@@ -555,21 +622,27 @@ func (s *E2ETestSuite) TestInvalidBids() {
 	})
 
 	s.Run("Invalid bid that is attempting to bid more than their balance", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            height + 1,
 		}
 		bidAmt := sdk.NewCoin(s.denom, math.NewInt(1000000000000000000))
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -577,40 +650,58 @@ func (s *E2ETestSuite) TestInvalidBids() {
 				ExpectFail: true,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("Invalid bid that is attempting to front-run/sandwich", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 1
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            nextBlockHeight,
 		}
 		msg2 := Tx{
 			User: s.user2,
-			Msgs: []sdk.Msg{banktypes.NewMsgSend(s.user2.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user2.FormattedAddress(),
+					ToAddress:   s.user3.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 		}
 		msg3 := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user3.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 2,
 			Height:            nextBlockHeight,
 		}
 
 		bidAmt := params.ReserveFee
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg, msg2, msg3})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg, msg2, msg3})
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -618,28 +709,34 @@ func (s *E2ETestSuite) TestInvalidBids() {
 				ExpectFail: true,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("Invalid bid that includes an invalid bundle tx", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 2,
 			Height:            height + 1,
 		}
 		bidAmt := params.ReserveFee
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -647,30 +744,36 @@ func (s *E2ETestSuite) TestInvalidBids() {
 				ExpectFail: true,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("Invalid auction bid with a bid smaller than the reserve fee", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            height + 1,
 		}
 
 		// create bid smaller than reserve
 		bidAmt := sdk.NewCoin(s.denom, sdk.NewInt(0))
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -678,22 +781,28 @@ func (s *E2ETestSuite) TestInvalidBids() {
 				ExpectFail: true,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("Invalid auction bid with too many transactions in the bundle", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msgs := make([]Tx, 4)
 		for i := range msgs {
 			msgs[i] = Tx{
-				User:              s.user1,
-				Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+				User: s.user1,
+				Msgs: []sdk.Msg{
+					&banktypes.MsgSend{
+						FromAddress: s.user1.FormattedAddress(),
+						ToAddress:   s.user2.FormattedAddress(),
+						Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+					},
+				},
 				SequenceIncrement: int64(i + 1),
 				Height:            height + 1,
 			}
@@ -701,10 +810,10 @@ func (s *E2ETestSuite) TestInvalidBids() {
 
 		// create bid smaller than reserve
 		bidAmt := sdk.NewCoin(s.denom, sdk.NewInt(0))
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, msgs)
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, msgs)
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -712,29 +821,35 @@ func (s *E2ETestSuite) TestInvalidBids() {
 				ExpectFail: true,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("invalid auction bid that has an invalid timeout", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            height + 1,
 		}
 
 		bidAmt := sdk.NewCoin(s.denom, params.ReserveFee.Amount)
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// broadcast wrapped bid, and expect a failure
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -742,22 +857,26 @@ func (s *E2ETestSuite) TestInvalidBids() {
 				ExpectFail: true,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("Invalid bid that includes valid transactions that are in the mempool", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create message send tx
-		msgSend := banktypes.NewMsgSend(s.user2.Address(), s.user3.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))
+		msgSend := &banktypes.MsgSend{
+			FromAddress: s.user2.FormattedAddress(),
+			ToAddress:   s.user3.FormattedAddress(),
+			Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+		}
 
 		// create the MsgAuctioBid (this should fail b.c same tx is repeated twice)
 		bidAmt := params.ReserveFee
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{
 			{
 				User: s.user2,
 				Msgs: []sdk.Msg{msgSend},
@@ -769,7 +888,7 @@ func (s *E2ETestSuite) TestInvalidBids() {
 		})
 
 		// broadcast + wait for the tx to be included in a block
-		txs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		txs := s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -784,25 +903,31 @@ func (s *E2ETestSuite) TestInvalidBids() {
 		})
 
 		// wait for next height
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, [][]byte{txs[1]})
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, [][]byte{txs[1]})
 	})
 
 	s.Run("searcher does not set the timeout height on their transactions", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 		}
 
 		bidAmt := sdk.NewCoin(s.denom, params.ReserveFee.Amount)
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// broadcast wrapped bid, and expect a failure
 		bidTx := Tx{
@@ -812,27 +937,33 @@ func (s *E2ETestSuite) TestInvalidBids() {
 			Height:     height + 1,
 		}
 
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{bidTx})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{bidTx})
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 
 	s.Run("timeout height on searchers txs in bundle do not match bid timeout", func() {
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create bid tx
 		msg := Tx{
-			User:              s.user1,
-			Msgs:              []sdk.Msg{banktypes.NewMsgSend(s.user1.Address(), s.user2.Address(), sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100))))},
+			User: s.user1,
+			Msgs: []sdk.Msg{
+				&banktypes.MsgSend{
+					FromAddress: s.user1.FormattedAddress(),
+					ToAddress:   s.user2.FormattedAddress(),
+					Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+				},
+			},
 			SequenceIncrement: 1,
 			Height:            height + 3,
 		}
 
 		bidAmt := sdk.NewCoin(s.denom, params.ReserveFee.Amount)
-		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain.(*cosmos.CosmosChain), bidAmt, []Tx{msg})
+		bid, _ := s.CreateAuctionBidMsg(context.Background(), s.user1, s.chain, bidAmt, []Tx{msg})
 
 		// broadcast wrapped bid, and expect a failure
 		bidTx := Tx{
@@ -842,11 +973,11 @@ func (s *E2ETestSuite) TestInvalidBids() {
 			Height:     height + 1,
 		}
 
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{bidTx})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		s.BroadcastTxs(context.Background(), s.chain, []Tx{bidTx})
+		WaitForHeight(s.T(), s.chain, height+1)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), height+1, nil)
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, height+1, nil)
 	})
 }
 
@@ -855,80 +986,82 @@ func (s *E2ETestSuite) TestInvalidBids() {
 // 1. Transactions that qualify as free should not be deducted any fees.
 // 2. Transactions that do not qualify as free should be deducted the correct fees.
 func (s *E2ETestSuite) TestFreeLane() {
-	validators := QueryValidators(s.T(), s.chain.(*cosmos.CosmosChain))
+	chain := s.chain
+
+	validators := QueryValidators(s.T(), chain)
 	require.True(s.T(), len(validators) > 0)
 
 	delegation := sdk.NewCoin(s.denom, sdk.NewInt(100))
 
 	s.Run("valid free lane transaction", func() {
 		// query balance of account before tx submission
-		balanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
+		balanceBefore := QueryAccountBalance(s.T(), chain, s.user1.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// create a free tx (MsgDelegate), broadcast and wait for commit
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), chain, []Tx{
 			{
 				User: s.user1,
 				Msgs: []sdk.Msg{
-					stakingtypes.NewMsgDelegate(
-						sdk.AccAddress(s.user1.Address()),
-						sdk.ValAddress(validators[0]),
-						delegation,
-					),
+					&stakingtypes.MsgDelegate{
+						DelegatorAddress: s.user1.FormattedAddress(),
+						ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
+						Amount:           delegation,
+					},
 				},
 				GasPrice: 10,
 			},
 		})
 
 		// wait for next block
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), chain, height+1)
 
 		// check balance of account
-		balanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
+		balanceAfter := QueryAccountBalance(s.T(), chain, s.user1.Address(), s.denom)
 		require.Equal(s.T(), balanceBefore, balanceAfter+delegation.Amount.Int64())
 	})
 
 	s.Run("normal tx with free tx in same block", func() {
-		user1BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
-		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user1BalanceBefore := QueryAccountBalance(s.T(), chain, s.user1.Address(), s.denom)
+		user2BalanceBefore := QueryAccountBalance(s.T(), chain, s.user2.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// user1 submits a free-tx, user2 submits a normal tx
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), chain, []Tx{
 			{
 				User: s.user1,
 				Msgs: []sdk.Msg{
-					stakingtypes.NewMsgDelegate(
-						sdk.AccAddress(s.user1.Address()),
-						sdk.ValAddress(validators[0]),
-						delegation,
-					),
+					&stakingtypes.MsgDelegate{
+						DelegatorAddress: s.user1.FormattedAddress(),
+						ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
+						Amount:           delegation,
+					},
 				},
 				GasPrice: 10,
 			},
 			{
 				User: s.user2,
 				Msgs: []sdk.Msg{
-					banktypes.NewMsgSend(
-						sdk.AccAddress(s.user2.Address()),
-						sdk.AccAddress(s.user3.Address()),
-						sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
-					),
+					&banktypes.MsgSend{
+						FromAddress: s.user2.FormattedAddress(),
+						ToAddress:   s.user3.FormattedAddress(),
+						Amount:      sdk.NewCoins(sdk.NewCoin(s.denom, sdk.NewInt(100))),
+					},
 				},
 				GasPrice: 10,
 			},
 		})
 
 		// wait for next block
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), chain, height+1)
 
 		// check balance after, user1 balance only diff by delegation
-		user1BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
-		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user1BalanceAfter := QueryAccountBalance(s.T(), chain, s.user1.Address(), s.denom)
+		user2BalanceAfter := QueryAccountBalance(s.T(), chain, s.user2.Address(), s.denom)
 
 		require.Equal(s.T(), user1BalanceBefore, user1BalanceAfter+delegation.Amount.Int64())
 
@@ -936,42 +1069,42 @@ func (s *E2ETestSuite) TestFreeLane() {
 	})
 
 	s.Run("multiple free transactions in same block", func() {
-		user1BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
-		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user1BalanceBefore := QueryAccountBalance(s.T(), chain, s.user1.Address(), s.denom)
+		user2BalanceBefore := QueryAccountBalance(s.T(), chain, s.user2.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := chain.Height(context.Background())
 		require.NoError(s.T(), err)
 
 		// user1 submits a free-tx, user2 submits a free tx
-		s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		s.BroadcastTxs(context.Background(), chain, []Tx{
 			{
 				User: s.user1,
 				Msgs: []sdk.Msg{
-					stakingtypes.NewMsgDelegate(
-						sdk.AccAddress(s.user1.Address()),
-						sdk.ValAddress(validators[0]),
-						delegation,
-					),
+					&stakingtypes.MsgDelegate{
+						DelegatorAddress: s.user1.FormattedAddress(),
+						ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
+						Amount:           delegation,
+					},
 				},
 			},
 			{
 				User: s.user2,
 				Msgs: []sdk.Msg{
-					stakingtypes.NewMsgDelegate(
-						sdk.AccAddress(s.user2.Address()),
-						sdk.ValAddress(validators[0]),
-						delegation,
-					),
+					&stakingtypes.MsgDelegate{
+						DelegatorAddress: s.user2.FormattedAddress(),
+						ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
+						Amount:           delegation,
+					},
 				},
 			},
 		})
 
 		// wait for next block
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+		WaitForHeight(s.T(), chain, height+1)
 
 		// check balance after, user1 balance only diff by delegation
-		user1BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
-		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user1BalanceAfter := QueryAccountBalance(s.T(), chain, s.user1.Address(), s.denom)
+		user2BalanceAfter := QueryAccountBalance(s.T(), chain, s.user2.Address(), s.denom)
 
 		require.Equal(s.T(), user1BalanceBefore, user1BalanceAfter+delegation.Amount.Int64())
 		require.Equal(s.T(), user2BalanceBefore, user2BalanceAfter+delegation.Amount.Int64())
@@ -979,7 +1112,7 @@ func (s *E2ETestSuite) TestFreeLane() {
 }
 
 func (s *E2ETestSuite) TestLanes() {
-	validators := QueryValidators(s.T(), s.chain.(*cosmos.CosmosChain))
+	validators := QueryValidators(s.T(), s.chain)
 	require.True(s.T(), len(validators) > 0)
 
 	delegation := sdk.NewCoin(s.denom, sdk.NewInt(100))
@@ -987,9 +1120,9 @@ func (s *E2ETestSuite) TestLanes() {
 	params := QueryAuctionParams(s.T(), s.chain)
 
 	s.Run("block with mev, free, and normal tx", func() {
-		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
@@ -997,7 +1130,7 @@ func (s *E2ETestSuite) TestLanes() {
 		bid, bundledTx := s.CreateAuctionBidMsg(
 			context.Background(),
 			s.user1,
-			s.chain.(*cosmos.CosmosChain),
+			s.chain,
 			params.ReserveFee,
 			[]Tx{
 				{
@@ -1024,11 +1157,11 @@ func (s *E2ETestSuite) TestLanes() {
 			{
 				User: s.user2,
 				Msgs: []sdk.Msg{
-					stakingtypes.NewMsgDelegate(
-						sdk.AccAddress(s.user2.Address()),
-						sdk.ValAddress(validators[0]),
-						delegation,
-					),
+					&stakingtypes.MsgDelegate{
+						DelegatorAddress: s.user2.FormattedAddress(),
+						ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
+						Amount:           delegation,
+					},
 				},
 				GasPrice: 10,
 			},
@@ -1044,24 +1177,24 @@ func (s *E2ETestSuite) TestLanes() {
 			},
 		}
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight-1)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight-1)
 
-		txs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), txsToBroadcast)
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		txs := s.BroadcastTxs(context.Background(), s.chain, txsToBroadcast)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, [][]byte{txs[0], bundledTx[0], txs[1], txs[2]})
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, [][]byte{txs[0], bundledTx[0], txs[1], txs[2]})
 
 		// check user2 balance expect no fee deduction
-		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 		require.Equal(s.T(), user2BalanceBefore, user2BalanceAfter+delegation.Amount.Int64())
 	})
 
 	s.Run("failing MEV transaction, free, and normal tx", func() {
-		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
-		user1Balance := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user1.FormattedAddress(), s.denom)
+		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
+		user1Balance := QueryAccountBalance(s.T(), s.chain, s.user1.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
@@ -1069,7 +1202,7 @@ func (s *E2ETestSuite) TestLanes() {
 		bid, _ := s.CreateAuctionBidMsg(
 			context.Background(),
 			s.user1,
-			s.chain.(*cosmos.CosmosChain),
+			s.chain,
 			params.ReserveFee,
 			[]Tx{
 				{
@@ -1099,8 +1232,8 @@ func (s *E2ETestSuite) TestLanes() {
 			},
 		)
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight-1)
-		txs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		WaitForHeight(s.T(), s.chain, nextBlockHeight-1)
+		txs := s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:       s.user1,
 				Msgs:       []sdk.Msg{bid},
@@ -1110,11 +1243,11 @@ func (s *E2ETestSuite) TestLanes() {
 			{
 				User: s.user2,
 				Msgs: []sdk.Msg{
-					stakingtypes.NewMsgDelegate(
-						sdk.AccAddress(s.user2.Address()),
-						sdk.ValAddress(validators[0]),
-						delegation,
-					),
+					&stakingtypes.MsgDelegate{
+						DelegatorAddress: s.user2.FormattedAddress(),
+						ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
+						Amount:           delegation,
+					},
 				},
 				GasPrice: 10,
 			},
@@ -1129,20 +1262,20 @@ func (s *E2ETestSuite) TestLanes() {
 				},
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, [][]byte{txs[1], txs[2]})
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, [][]byte{txs[1], txs[2]})
 
 		// check user2 balance expect no fee deduction
-		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 		require.Equal(s.T(), user2BalanceBefore, user2BalanceAfter+delegation.Amount.Int64())
 	})
 
 	s.Run("MEV transaction that includes transactions from the free lane", func() {
-		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
@@ -1151,7 +1284,7 @@ func (s *E2ETestSuite) TestLanes() {
 			Msgs: []sdk.Msg{
 				&stakingtypes.MsgDelegate{
 					DelegatorAddress: s.user2.FormattedAddress(),
-					ValidatorAddress: sdk.ValAddress(validators[0]).String(),
+					ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
 					Amount:           delegation,
 				},
 			},
@@ -1161,7 +1294,7 @@ func (s *E2ETestSuite) TestLanes() {
 		bid, bundledTx := s.CreateAuctionBidMsg(
 			context.Background(),
 			s.user3,
-			s.chain.(*cosmos.CosmosChain),
+			s.chain,
 			params.ReserveFee,
 			[]Tx{
 				delegateTx,
@@ -1180,28 +1313,28 @@ func (s *E2ETestSuite) TestLanes() {
 			},
 		)
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight-1)
-		txs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		WaitForHeight(s.T(), s.chain, nextBlockHeight-1)
+		txs := s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:   s.user3,
 				Msgs:   []sdk.Msg{bid},
 				Height: nextBlockHeight,
 			},
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify the block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, [][]byte{txs[0], bundledTx[0], bundledTx[1]})
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, [][]byte{txs[0], bundledTx[0], bundledTx[1]})
 
 		// query balance after, expect no fees paid
-		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 		s.Require().Equal(user2BalanceBefore, user2BalanceAfter+delegation.Amount.Int64())
 	})
 
 	s.Run("MEV transaction that includes transaction from free lane + other free lane txs + normal txs", func() {
-		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceBefore := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 
-		height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+		height, err := s.chain.Height(context.Background())
 		require.NoError(s.T(), err)
 		nextBlockHeight := height + 2
 
@@ -1211,7 +1344,7 @@ func (s *E2ETestSuite) TestLanes() {
 			Msgs: []sdk.Msg{
 				&stakingtypes.MsgDelegate{
 					DelegatorAddress: s.user2.FormattedAddress(),
-					ValidatorAddress: sdk.ValAddress(validators[0]).String(),
+					ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
 					Amount:           delegation,
 				},
 			},
@@ -1223,7 +1356,7 @@ func (s *E2ETestSuite) TestLanes() {
 			Msgs: []sdk.Msg{
 				&stakingtypes.MsgDelegate{
 					DelegatorAddress: s.user3.FormattedAddress(),
-					ValidatorAddress: sdk.ValAddress(validators[0]).String(),
+					ValidatorAddress: MustValAddressToBech32(s.chain, validators[0]),
 					Amount:           delegation,
 				},
 			},
@@ -1237,7 +1370,7 @@ func (s *E2ETestSuite) TestLanes() {
 		bid, bundledTx := s.CreateAuctionBidMsg(
 			context.Background(),
 			s.user3,
-			s.chain.(*cosmos.CosmosChain),
+			s.chain,
 			params.ReserveFee,
 			[]Tx{
 				user3DelegateTx,
@@ -1256,8 +1389,8 @@ func (s *E2ETestSuite) TestLanes() {
 			},
 		)
 
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight-1)
-		txs := s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{
+		WaitForHeight(s.T(), s.chain, nextBlockHeight-1)
+		txs := s.BroadcastTxs(context.Background(), s.chain, []Tx{
 			{
 				User:   s.user3,
 				Msgs:   []sdk.Msg{bid},
@@ -1266,13 +1399,13 @@ func (s *E2ETestSuite) TestLanes() {
 			// already included above
 			user2DelegateTx,
 		})
-		WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight)
+		WaitForHeight(s.T(), s.chain, nextBlockHeight)
 
 		// verify block
-		VerifyBlockWithExpectedBlock(s.T(), s.chain.(*cosmos.CosmosChain), nextBlockHeight, [][]byte{txs[0], bundledTx[0], bundledTx[1], txs[1]})
+		VerifyBlockWithExpectedBlock(s.T(), s.chain, nextBlockHeight, [][]byte{txs[0], bundledTx[0], bundledTx[1], txs[1]})
 
 		// check user2 balance expect no fee deduction
-		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain.(*cosmos.CosmosChain), s.user2.FormattedAddress(), s.denom)
+		user2BalanceAfter := QueryAccountBalance(s.T(), s.chain, s.user2.Address(), s.denom)
 		require.Equal(s.T(), user2BalanceBefore, user2BalanceAfter+delegation.Amount.Int64())
 	})
 }
@@ -1284,7 +1417,7 @@ func (s *E2ETestSuite) TestNetwork() {
 	numTxs := 10
 	sendAmount := sdk.NewCoins(sdk.NewCoin(s.denom, math.NewInt(100)))
 	delegation := sdk.NewCoin(s.denom, math.NewInt(100))
-	validators := QueryValidators(s.T(), s.chain.(*cosmos.CosmosChain))
+	validators := QueryValidators(s.T(), s.chain)
 
 	s.Run("can produce blocks with only default transactions", func() {
 		for {
@@ -1292,9 +1425,9 @@ func (s *E2ETestSuite) TestNetwork() {
 			case <-amountToTest.C:
 				return
 			default:
-				height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+				height, err := s.chain.Height(context.Background())
 				s.NoError(err)
-				WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+				WaitForHeight(s.T(), s.chain, height+1)
 
 				s.T().Logf("height: %d", height+1)
 
@@ -1304,7 +1437,7 @@ func (s *E2ETestSuite) TestNetwork() {
 						sequenceOffset := int64(i)
 
 						normalTx := s.CreateDummyNormalTx(user, s.user1, sendAmount, sequenceOffset, fee)
-						s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{normalTx})
+						s.BroadcastTxs(context.Background(), s.chain, []Tx{normalTx})
 					}
 				}
 
@@ -1321,9 +1454,9 @@ func (s *E2ETestSuite) TestNetwork() {
 			case <-amountToTest.C:
 				return
 			default:
-				height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+				height, err := s.chain.Height(context.Background())
 				s.NoError(err)
-				WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+				WaitForHeight(s.T(), s.chain, height+1)
 
 				s.T().Logf("height: %d", height+1)
 
@@ -1332,7 +1465,7 @@ func (s *E2ETestSuite) TestNetwork() {
 						sequenceOffset := int64(i)
 
 						freeTx := s.CreateDummyFreeTx(user, validators[0], delegation, sequenceOffset)
-						s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{freeTx})
+						s.BroadcastTxs(context.Background(), s.chain, []Tx{freeTx})
 					}
 				}
 
@@ -1349,9 +1482,9 @@ func (s *E2ETestSuite) TestNetwork() {
 			case <-amountToTest.C:
 				return
 			default:
-				height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+				height, err := s.chain.Height(context.Background())
 				s.NoError(err)
-				WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+				WaitForHeight(s.T(), s.chain, height+1)
 
 				s.T().Logf("height: %d", height+1)
 
@@ -1365,7 +1498,7 @@ func (s *E2ETestSuite) TestNetwork() {
 							user,
 							bidAmount,
 						)
-						s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), []Tx{mevTx})
+						s.BroadcastTxs(context.Background(), s.chain, []Tx{mevTx})
 					}
 				}
 			}
@@ -1379,9 +1512,9 @@ func (s *E2ETestSuite) TestNetwork() {
 			case <-amountToTest.C:
 				return
 			default:
-				height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+				height, err := s.chain.Height(context.Background())
 				s.NoError(err)
-				WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+				WaitForHeight(s.T(), s.chain, height+1)
 
 				s.T().Logf("height: %d", height+1)
 
@@ -1420,7 +1553,7 @@ func (s *E2ETestSuite) TestNetwork() {
 					}
 				}
 
-				s.BroadcastTxs(context.Background(), s.chain.(*cosmos.CosmosChain), txs)
+				s.BroadcastTxs(context.Background(), s.chain, txs)
 			}
 		}
 	})
@@ -1433,9 +1566,9 @@ func (s *E2ETestSuite) TestNetwork() {
 			case <-amountToTest.C:
 				return
 			default:
-				height, err := s.chain.(*cosmos.CosmosChain).Height(context.Background())
+				height, err := s.chain.Height(context.Background())
 				s.NoError(err)
-				WaitForHeight(s.T(), s.chain.(*cosmos.CosmosChain), height+1)
+				WaitForHeight(s.T(), s.chain, height+1)
 
 				s.T().Logf("height: %d", height+1)
 			}
